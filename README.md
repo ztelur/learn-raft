@@ -1,2 +1,13 @@
 # learn-raft
 learn raft
+
+### document
+
+http://nil.lcs.mit.edu/6.824/2020/papers/raft-extended.pdf
+
+### etcd raft
+
+https://github.com/etcd-io/etcd/tree/release-3.5
+
+
+
