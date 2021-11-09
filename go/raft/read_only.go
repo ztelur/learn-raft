@@ -21,8 +21,17 @@ import pb "go.etcd.io/etcd/raft/v3/raftpb"
 // this state from ready, it's also caller's duty to differentiate if this
 // state is what it requests through RequestCtx, eg. given a unique id as
 // RequestCtx
+/**
+leader在接收到读请求时，需要向集群中的超半数server确认自己仍然是当前的leader，这样它返回的就是最新的数据。
+
+线性一致性（Linearizable Read）通俗来讲，就是读请求需要读到最新的已经commit的数据，不会读到老数据。
+
+
+*/
 type ReadState struct {
+	// Index：接收到该读请求时，当前节点的commit索引。
 	Index      uint64
+	// RequestCtx：客户端读请求的唯一标识
 	RequestCtx []byte
 }
 

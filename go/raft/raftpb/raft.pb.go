@@ -380,23 +380,184 @@ func (m *Snapshot) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_Snapshot proto.InternalMessageInfo
 
+/**
+Message结构体，全部将raft协议相关的数据都定义在了一起，有些协议不是用到其中的全部数据，所以这里的字段都是optinal的
+
+所以每个协议的的使用如下所示
+
+MsgHup消息
+
+type	MsgHup	不用于节点间通信，仅用于发送给本节点让本节点进行选举
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+
+MsgBeat消息
+
+成员	类型	作用
+type	MsgBeat	不用于节点间通信，仅用于leader节点在heartbeat定时器到期时向集群中其他节点发送心跳消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+
+
+MsgProp消息
+
+成员	类型	作用
+type	MsgProp	raft库使用者提议（propose）数据
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+entries	Entry	日志条目数组
+
+raft库的使用者向raft库propose数据时，最后会封装成这个类型的消息来进行提交，不同类型的节点处理还不尽相同。
+
+
+MsgApp消息
+成员	类型	作用
+type	MsgApp	用于leader向集群中其他节点同步数据的消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+entries	Entry	日志条目数组
+logTerm	uint64	日志所处的任期ID
+index	uint64	索引ID
+
+
+MsgSnap消息
+成员	类型	作用
+type	MsgSnap	用于leader向follower同步数据用的快照消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+snapshot	Snapshot	快照数据
+
+同步分为两种情况，append和snapshot
+
+
+
+MsgAppResp消息
+成员	类型	作用
+type	MsgAppResp	集群中其他节点针对leader的MsgApp/MsgSnap消息的应答消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+index	uint64	日志索引ID，用于节点向leader汇报自己已经commit的日志数据ID
+reject	bool	是否拒绝同步日志的请求
+rejectHint	uint64	拒绝同步日志请求时返回的当前节点日志ID，用于被拒绝方快速定位到下一次合适的同步日志位置
+
+
+点收到leader的MsgApp/MsgSnap消息时，可能出现leader上的数据与自身节点数据不一致的情况，这种情况下会返回reject为true的MsgAppResp消息，同时rejectHint字段是本节点raft最后一条日志的索引ID
+
+MsgVote/MsgPreVote消息以及MsgVoteResp/MsgPreVoteResp消息
+这里把这四种消息放在一起了，因为不论是Vote还是PreVote流程，其请求和应答时传输的数据都是一样的。
+
+先看请求数据。
+
+成员	类型	作用
+type	MsgVote/MsgPreVote	节点投票给自己以进行新一轮的选举
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+term	uint64	任期ID
+index	uint64	日志索引ID，用于节点向leader汇报自己已经commit的日志数据ID
+logTerm	uint64	日志所处的任期ID
+context	bytes	上下文数据
+应答数据。
+
+成员	类型	作用
+type	MsgVoteResp/MsgPreVoteResp	投票应答消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+reject	bool	是否拒绝
+
+
+
+MsgHeartbeat/MsgHeartbeatResp消息
+心跳请求消息。
+
+成员	类型	作用
+type	MsgHeartbeat	用于leader向follower发送心跳消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+commit	uint64	提交日志索引
+context	bytes	上下文数据，在这里保存一致性读相关的数据
+心跳请求应答消息。
+
+成员	类型	作用
+type	MsgHeartbeatResp	用于follower向leader应答心跳消息
+to	uint64	消息接收者的节点ID
+from	uint64	本节点ID
+context	bytes	上下文数据，在这里保存一致性读相关的数据
+
+
+
+MsgUnreachable消息
+成员	类型	作用
+type	MsgUnreachable	用于应用层向raft库汇报某个节点当前已不可达
+to	uint64	消息接收者的节点ID
+from	uint64	不可用的节点ID
+仅leader才处理这类消息，leader如果判断该节点此时处于正常接收数据的状态（ProgressStateReplicate），那么就切换到探测状态。
+
+
+MsgSnapStatus消息
+成员	类型	作用
+type	MsgSnapStatus	用于应用层向raft库汇报某个节点当前接收快照状态
+to	uint64	消息接收者的节点ID
+from	uint64	节点ID
+reject	bool	是否拒绝
+仅leader处理这类消息：
+
+如果reject为false：表示接收快照成功，将切换该节点状态到探测状态。
+否则接收失败。
+
+MsgCheckQuorum消息
+成员	类型	作用
+type	MsgCheckQuorum	用于leader检查集群可用性的消息
+to	uint64	消息接收者的节点ID
+from	uint64	节点ID
+leader的定时器函数，在超过选举时间时，如果当前打开了raft.checkQuorum开关，那么leader将给自己发送一条MsgCheckQuorum消息，对该消息的处理是：检查集群中所有节点的状态，如果超过半数的节点都不活跃了，那么leader也切换到follower状态。
+
+
+MsgReadIndex和MsgReadIndexResp消息
+这两个消息一一对应，使用的成员也一样，在后面分析读一致性的时候再详细解释。
+
+成员	类型	作用
+type	MsgReadIndex	用于读一致性的消息
+to	uint64	接收者节点ID
+from	uint64	发送者节点ID
+entries	Entry	日志条目数组
+
+
+MsgTimeoutNow消息
+成员	类型	作用
+type	MsgTimeoutNow	leader迁移时，当新旧leader的日志数据同步后，旧leader向新leader发送该消息通知可以进行迁移了
+to	uint64	新的leader ID
+from	uint64	旧的leader的节点ID
+
+*/
 type Message struct {
+	// 消息类型
 	Type MessageType `protobuf:"varint,1,opt,name=type,enum=raftpb.MessageType" json:"type"`
+	// 消息接收者的节点ID
 	To   uint64      `protobuf:"varint,2,opt,name=to" json:"to"`
+	// 消息发送者的节点ID
 	From uint64      `protobuf:"varint,3,opt,name=from" json:"from"`
+	// 任期ID
 	Term uint64      `protobuf:"varint,4,opt,name=term" json:"term"`
 	// logTerm is generally used for appending Raft logs to followers. For example,
 	// (type=MsgApp,index=100,logTerm=5) means leader appends entries starting at
 	// index=101, and the term of entry at index 100 is 5.
 	// (type=MsgAppResp,reject=true,index=100,logTerm=5) means follower rejects some
 	// entries from its leader as it already has an entry with term 5 at index 100.
+	// 日志所处的任期ID
 	LogTerm    uint64   `protobuf:"varint,5,opt,name=logTerm" json:"logTerm"`
+	// 日志索引ID，用于节点向leader汇报自己已经commit的日志数据ID
 	Index      uint64   `protobuf:"varint,6,opt,name=index" json:"index"`
+	// 日志条目数组
 	Entries    []Entry  `protobuf:"bytes,7,rep,name=entries" json:"entries"`
+	// 提交日志索引
 	Commit     uint64   `protobuf:"varint,8,opt,name=commit" json:"commit"`
+	// 快照数据
 	Snapshot   Snapshot `protobuf:"bytes,9,opt,name=snapshot" json:"snapshot"`
+	// 是否拒绝
 	Reject     bool     `protobuf:"varint,10,opt,name=reject" json:"reject"`
+	// 拒绝同步日志请求时返回的当前节点日志ID，用于被拒绝方快速定位到下一次合适的同步日志位置
 	RejectHint uint64   `protobuf:"varint,11,opt,name=rejectHint" json:"rejectHint"`
+	// 上下文数据
 	Context    []byte   `protobuf:"bytes,12,opt,name=context" json:"context,omitempty"`
 }
 

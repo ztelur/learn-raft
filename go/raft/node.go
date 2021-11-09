@@ -53,35 +53,42 @@ type Ready struct {
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
 	// It is not required to consume or store SoftState.
+	// 软状态，软状态易变且不需要保存在WAL日志中的状态数据，包括：集群leader、节点的当前状态
 	*SoftState
 
 	// The current state of a Node to be saved to stable storage BEFORE
 	// Messages are sent.
 	// HardState will be equal to empty state if there is no update.
+	// 硬状态，与软状态相反，需要写入持久化存储中，包括：节点当前Term、Vote、Commit
 	pb.HardState
 
 	// ReadStates can be used for node to serve linearizable read requests locally
 	// when its applied index is greater than the index in ReadState.
 	// Note that the readState will be returned when raft receives msgReadIndex.
 	// The returned is only valid for the request that requested to read.
+	// 用于读一致性的数据
 	ReadStates []ReadState
 
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
+	// 在向其他集群发送消息之前需要先写入持久化存储的日志数据
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
+	// 需要写入持久化存储中的快照数据
 	Snapshot pb.Snapshot
 
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
+	// 需要输入到状态机中的数据，这些数据之前已经被保存到持久化存储中了
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
 	// committed to stable storage.
 	// If it contains a MsgSnap message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
+	// 在entries被写入持久化存储中以后，需要发送出去的数据
 	Messages []pb.Message
 
 	// MustSync indicates whether the HardState and Entries must be synchronously
@@ -126,11 +133,15 @@ func (rd Ready) appliedCursor() uint64 {
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
 	// timeouts and heartbeat timeouts are in units of ticks.
+	// 应用层每次tick时需要调用该函数，将会由这里驱动raft的一些操作比如选举等。
+	// 至于tick的单位是多少由应用层自己决定，只要保证是恒定时间都会来调用一次就好了。
 	Tick()
 	// Campaign causes the Node to transition to candidate state and start campaigning to become leader.
+	// 调用该函数将驱动节点进入候选人状态，进而将竞争leader。
 	Campaign(ctx context.Context) error
 	// Propose proposes that data be appended to the log. Note that proposals can be lost without
 	// notice, therefore it is user's job to ensure proposal retries.
+	// 提议写入数据到日志中，可能会返回错误。
 	Propose(ctx context.Context, data []byte) error
 	// ProposeConfChange proposes a configuration change. Like any proposal, the
 	// configuration change may be dropped with or without an error being
@@ -144,9 +155,11 @@ type Node interface {
 	// message is only allowed if all Nodes participating in the cluster run a
 	// version of this library aware of the V2 API. See pb.ConfChangeV2 for
 	// usage details and semantics.
+	// 提交配置变更
 	ProposeConfChange(ctx context.Context, cc pb.ConfChangeI) error
 
 	// Step advances the state machine using the given message. ctx.Err() will be returned, if any.
+	// 将消息msg灌入状态机中
 	Step(ctx context.Context, msg pb.Message) error
 
 	// Ready returns a channel that returns the current point-in-time state.
@@ -154,6 +167,7 @@ type Node interface {
 	//
 	// NOTE: No committed entries from the next Ready may be applied until all committed entries
 	// and snapshots from the previous one have finished.
+	// 返回Ready的channel，应用层需要关注这个channel，当发生变更时将其中的数据进行操作
 	Ready() <-chan Ready
 
 	// Advance notifies the Node that the application has saved progress up to the last Ready.
@@ -165,6 +179,7 @@ type Node interface {
 	// commands. For example. when the last Ready contains a snapshot, the application might take
 	// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
 	// progress, it can call Advance before finishing applying the last ready.
+	// Advance函数是当使用者已经将上一次Ready数据处理之后，调用该函数告诉raft库可以进行下一步的操作
 	Advance()
 	// ApplyConfChange applies a config change (previously passed to
 	// ProposeConfChange) to the node. This must be called whenever a config
@@ -416,7 +431,7 @@ func (n *node) Tick() {
 }
 
 func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Message{Type: pb.MsgHup}) }
-
+// 1.1 提交提案
 func (n *node) Propose(ctx context.Context, data []byte) error {
 	return n.stepWait(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 }
@@ -456,9 +471,12 @@ func (n *node) stepWait(ctx context.Context, m pb.Message) error {
 
 // Step advances the state machine using msgs. The ctx.Err() will be returned,
 // if any.
+// 带等待的step，会一直等到处理结束才返回
 func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) error {
+	// 如果不是舔，则直接处理
 	if m.Type != pb.MsgProp {
 		select {
+		// 发给 recvc
 		case n.recvc <- m:
 			return nil
 		case <-ctx.Done():

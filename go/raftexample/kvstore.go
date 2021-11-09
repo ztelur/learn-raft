@@ -64,13 +64,16 @@ func (s *kvstore) Lookup(key string) (string, bool) {
 
 func (s *kvstore) Propose(k string, v string) {
 	var buf bytes.Buffer
+	// 序列化
 	if err := gob.NewEncoder(&buf).Encode(kv{k, v}); err != nil {
 		log.Fatal(err)
 	}
+	// 将投案发到 channel 中
 	s.proposeC <- buf.String()
 }
 
 func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
+	// 依次处理从 channel 中传递而来的 commit entry
 	for commit := range commitC {
 		if commit == nil {
 			// signaled to load snapshot
@@ -86,7 +89,7 @@ func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
 			}
 			continue
 		}
-
+		// 简单的将数据存储到内存的map中
 		for _, data := range commit.data {
 			var dataKv kv
 			dec := gob.NewDecoder(bytes.NewBufferString(data))
@@ -97,6 +100,7 @@ func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
 			s.kvStore[dataKv.Key] = dataKv.Val
 			s.mu.Unlock()
 		}
+		// 表示提案已经处理
 		close(commit.applyDoneC)
 	}
 	if err, ok := <-errorC; ok {

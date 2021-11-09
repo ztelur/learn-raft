@@ -52,6 +52,7 @@ func (ln stoppableListener) Accept() (c net.Conn, err error) {
 	case err := <-errc:
 		return nil, err
 	case tc := <-connc:
+		// 为了设置 connc 的参数
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(3 * time.Minute)
 		return tc, nil

@@ -43,6 +43,7 @@ type commit struct {
 }
 
 // A key-value stream backed by raft
+// 这是一个已经封装好的 raft，并不是raft库
 type raftNode struct {
 	proposeC    <-chan string            // proposed messages (k,v)
 	confChangeC <-chan raftpb.ConfChange // proposed cluster config changes
@@ -86,7 +87,7 @@ var defaultSnapshotCount uint64 = 10000
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
 	confChangeC <-chan raftpb.ConfChange) (<-chan *commit, <-chan error, <-chan *snap.Snapshotter) {
-
+	// 已提交 log entry channel
 	commitC := make(chan *commit)
 	errorC := make(chan error)
 
@@ -272,6 +273,7 @@ func (rc *raftNode) writeError(err error) {
 }
 
 func (rc *raftNode) startRaft() {
+	// 检查创建文件夹
 	if !fileutil.Exist(rc.snapdir) {
 		if err := os.Mkdir(rc.snapdir, 0750); err != nil {
 			log.Fatalf("raftexample: cannot create dir for snapshot (%v)", err)
@@ -285,6 +287,7 @@ func (rc *raftNode) startRaft() {
 	// signal replay has finished
 	rc.snapshotterReady <- rc.snapshotter
 
+	// 初始化 raft node instance
 	rpeers := make([]raft.Peer, len(rc.peers))
 	for i := range rpeers {
 		rpeers[i] = raft.Peer{ID: uint64(i + 1)}
@@ -298,7 +301,7 @@ func (rc *raftNode) startRaft() {
 		MaxInflightMsgs:           256,
 		MaxUncommittedEntriesSize: 1 << 30,
 	}
-
+	// 判断是新节点，还是重启节点
 	if oldwal || rc.join {
 		rc.node = raft.RestartNode(c)
 	} else {
@@ -314,8 +317,9 @@ func (rc *raftNode) startRaft() {
 		LeaderStats: stats.NewLeaderStats(zap.NewExample(), strconv.Itoa(rc.id)),
 		ErrorC:      make(chan error),
 	}
-
+	// 启动网络
 	rc.transport.Start()
+	// 加入其他节点
 	for i := range rc.peers {
 		if i+1 != rc.id {
 			rc.transport.AddPeer(types.ID(i+1), []string{rc.peers[i]})
@@ -323,6 +327,7 @@ func (rc *raftNode) startRaft() {
 	}
 
 	go rc.serveRaft()
+	// 处理raft node之间的交流
 	go rc.serveChannels()
 }
 
@@ -399,7 +404,27 @@ func (rc *raftNode) maybeTriggerSnapshot(applyDoneC <-chan struct{}) {
 	rc.snapshotIndex = rc.appliedIndex
 }
 
+/**
+如果proposeC中有数据写入：
+    调用node.Propose向raft库提交数据
+  如果confChangeC中有数据写入：
+    调用node.Node.ProposeConfChange向raft库提交配置变更数据
+  如果tick定时器到期：
+    调用node.Tick函数进行raft库的定时操作
+  如果node.Ready()函数返回的Ready结构体channel有数据变更：
+    依次处理Ready结构体中各成员数据
+    处理完毕之后调用node.Advance函数进行收尾处理
+*/
 func (rc *raftNode) serveChannels() {
+	/**
+
+	如果收到proposeC channel的消息，说明有数据提交，则调用Node.Propose函数进行数据的提交。
+	如果收到confChangeC channel的消息，说明有配置变更，则调用Node.ProposeConfChange函数进行配置变更。
+	设置一个定时器tick，每次定时器到时时，调用Node.Tick函数。
+	监听Node.Ready函数返回的Ready结构体channel，有数据变更时根据Ready结构体的不同数据类型进行相应的操作，完成了之后需要调用Node.Advance函数进行收尾。
+
+	*/
+
 	snap, err := rc.raftStorage.Snapshot()
 	if err != nil {
 		panic(err)
@@ -420,6 +445,7 @@ func (rc *raftNode) serveChannels() {
 		for rc.proposeC != nil && rc.confChangeC != nil {
 			select {
 			case prop, ok := <-rc.proposeC:
+				// 接受到应用层传来提案，调用raft-node的接口提交一下
 				if !ok {
 					rc.proposeC = nil
 				} else {
@@ -449,6 +475,8 @@ func (rc *raftNode) serveChannels() {
 
 		// store raft entries to wal, then publish over commit channel
 		case rd := <-rc.node.Ready():
+			// 获取到未提交的提案
+			// 将其保存到 wal
 			rc.wal.Save(rd.HardState, rd.Entries)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				rc.saveSnap(rd.Snapshot)
@@ -476,6 +504,7 @@ func (rc *raftNode) serveChannels() {
 	}
 }
 
+// 建立用于 raft 的网络通讯
 func (rc *raftNode) serveRaft() {
 	url, err := url.Parse(rc.peers[rc.id-1])
 	if err != nil {
@@ -486,7 +515,7 @@ func (rc *raftNode) serveRaft() {
 	if err != nil {
 		log.Fatalf("raftexample: Failed to listen rafthttp (%v)", err)
 	}
-
+	// 网络 api 这样用还是第一次见
 	err = (&http.Server{Handler: rc.transport.Handler()}).Serve(ln)
 	select {
 	case <-rc.httpstopc:

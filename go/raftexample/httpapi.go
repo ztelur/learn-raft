@@ -29,6 +29,14 @@ type httpKVAPI struct {
 	confChangeC chan<- raftpb.ConfChange
 }
 
+/**
+HttpServer主循环:
+  接收用户提交的数据：
+    如果是PUT请求：
+      将数据写入到proposeC中
+    如果是POST请求：
+      将配置变更数据写入到confChangeC中
+*/
 func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.RequestURI
 	defer r.Body.Close()
@@ -40,7 +48,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed on PUT", http.StatusBadRequest)
 			return
 		}
-
+		// 发起提案
 		h.store.Propose(key, string(v))
 
 		// Optimistic-- no waiting for ack from raft. Value is not yet

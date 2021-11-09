@@ -21,20 +21,27 @@ import (
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+// 这个结构体承担了raft日志相关的操作。
 type raftLog struct {
 	// storage contains all stable entries since the last snapshot.
+	// 存放已经持久化数据的Storage接口
 	storage Storage
 
 	// unstable contains all unstable entries and snapshot.
 	// they will be saved into storage.
+	// unstable结构体，用于保存应用层还没有持久化的数据
 	unstable unstable
 
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
+	// 当前提交的日志数据索引
 	committed uint64
 	// applied is the highest log position that the application has
 	// been instructed to apply to its state machine.
 	// Invariant: applied <= committed
+	// 当前传入状态机的数据最高索引
+	// 一条日志数据，首先需要被提交（committed）成功，
+	// 然后才能被应用（applied）到状态机中。因此，以下不等式一直成立：applied <= committed
 	applied uint64
 
 	logger Logger
@@ -53,6 +60,11 @@ func newLog(storage Storage, logger Logger) *raftLog {
 
 // newLogWithSize returns a log using the given storage and max
 // message size.
+// 初始化函数
+/**
+raftLog的两部分，持久化存储和非持久化存储，它们之间的分界线就是lastIndex，
+在此之前都是Storage管理的已经持久化的数据，而在此之后都是unstable管理的还没有持久化的数据。
+ */
 func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raftLog {
 	if storage == nil {
 		log.Panic("storage must not be nil")
@@ -62,17 +74,22 @@ func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raf
 		logger:          logger,
 		maxNextEntsSize: maxNextEntsSize,
 	}
+	// 该值取自storage.FirstIndex()，可以从MemoryStorage的实现看到，
+	// 该值是MemoryStorage.ents数组的第一个数据索引，也就是MemoryStorage结构体中快照数据与日志条目数据的分界线。
 	firstIndex, err := storage.FirstIndex()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
+	// 该值取自storage.LastIndex()，可以从MemoryStorage的实现看到，该值是MemoryStorage.ents数组的最后一个数据索引。
 	lastIndex, err := storage.LastIndex()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
+	// 该值为lastIndex索引的下一个位置。
 	log.unstable.offset = lastIndex + 1
 	log.unstable.logger = logger
 	// Initialize our committed and applied pointers to the time of the last compaction.
+	// 这两个值是firstIndex的上一个索引位置，这是因为在firstIndex之前的数据既然已经是持久化数据了，说明都是已经被提交成功的数据了
 	log.committed = firstIndex - 1
 	log.applied = firstIndex - 1
 
