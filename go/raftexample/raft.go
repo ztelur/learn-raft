@@ -95,6 +95,7 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		proposeC:    proposeC,
 		confChangeC: confChangeC,
 		commitC:     commitC,
+
 		errorC:      errorC,
 		id:          id,
 		peers:       peers,
@@ -189,6 +190,7 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) (<-chan struct{}, bool) 
 	if len(data) > 0 {
 		applyDoneC = make(chan struct{}, 1)
 		select {
+		// 交给 commitC 回由 kvstore 进行接收，从而进行处理
 		case rc.commitC <- &commit{data, applyDoneC}:
 		case <-rc.stopc:
 			return nil, false
@@ -307,7 +309,19 @@ func (rc *raftNode) startRaft() {
 	} else {
 		rc.node = raft.StartNode(c, rpeers)
 	}
+	// 构造node之间交互的transport
 
+	/**
+	type Raft interface {
+		Process(ctx context.Context, m raftpb.Message) error
+		IsIDRemoved(id uint64) bool
+		ReportUnreachable(id uint64)
+		ReportSnapshot(id uint64, status raft.SnapshotStatus)
+	}
+
+	Raft 必须实现以上接口，用于让rafthttp接口调用
+
+	*/
 	rc.transport = &rafthttp.Transport{
 		Logger:      rc.logger,
 		ID:          types.ID(rc.id),
@@ -477,6 +491,7 @@ func (rc *raftNode) serveChannels() {
 		case rd := <-rc.node.Ready():
 			// 获取到未提交的提案
 			// 将其保存到 wal
+			// 将新的提案保存到本地
 			rc.wal.Save(rd.HardState, rd.Entries)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				rc.saveSnap(rd.Snapshot)
@@ -484,7 +499,9 @@ func (rc *raftNode) serveChannels() {
 				rc.publishSnapshot(rd.Snapshot)
 			}
 			rc.raftStorage.Append(rd.Entries)
+			// 将新的提案发送给其他node
 			rc.transport.Send(rd.Messages)
+			// 将提交的应用到上层状态机中
 			applyDoneC, ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries))
 			if !ok {
 				rc.stop()
@@ -525,6 +542,7 @@ func (rc *raftNode) serveRaft() {
 	close(rc.httpdonec)
 }
 
+// 应该是接受到了 transport 传输过来的 msg了，直接交给本地node处理
 func (rc *raftNode) Process(ctx context.Context, m raftpb.Message) error {
 	return rc.node.Step(ctx, m)
 }

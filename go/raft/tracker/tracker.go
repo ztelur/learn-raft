@@ -174,6 +174,7 @@ func (l matchAckIndexer) AckedIndex(id uint64) (quorum.Index, bool) {
 
 // Committed returns the largest log index known to be committed based on what
 // the voting members of the group have acknowledged.
+// 根据结果取最大的 commitindex
 func (p *ProgressTracker) Committed() uint64 {
 	return uint64(p.Voters.CommittedIndex(matchAckIndexer(p.Progress)))
 }

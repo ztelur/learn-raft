@@ -378,6 +378,7 @@ func (r *raft) hasLeader() bool { return r.lead != None }
 func (r *raft) softState() *SoftState { return &SoftState{Lead: r.lead, RaftState: r.state} }
 
 func (r *raft) hardState() pb.HardState {
+	// 所有需要持久化的状态
 	return pb.HardState{
 		Term:   r.Term,
 		Vote:   r.Vote,
@@ -387,7 +388,7 @@ func (r *raft) hardState() pb.HardState {
 
 // send schedules persisting state to a stable storage and AFTER that
 // sending the message (as part of next Ready message processing).
-// 先持久化，然后再发送
+// 加入到等待发送队列中
 func (r *raft) send(m pb.Message) {
 	if m.From == None {
 		m.From = r.id
@@ -435,7 +436,9 @@ func (r *raft) sendAppend(to uint64) {
 // argument controls whether messages with no entries will be sent
 // ("empty" messages are useful to convey updated Commit indexes, but
 // are undesirable when we're sending multiple messages in a batch).
+// 将 append RPC 消息发送给其他peer
 func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
+	// 从 prs 中取出对应的数据
 	pr := r.prs.Progress[to]
 	if pr.IsPaused() {
 		return false
@@ -444,6 +447,7 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 	m.To = to
 
 	term, errt := r.raftLog.term(pr.Next - 1)
+	// 带上尚未同步的index之后的 entry
 	ents, erre := r.raftLog.entries(pr.Next, r.maxMsgSize)
 	if len(ents) == 0 && !sendIfEmpty {
 		return false
@@ -474,10 +478,12 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 		pr.BecomeSnapshot(sindex)
 		r.logger.Debugf("%x paused sending replication messages to %x [%s]", r.id, to, pr)
 	} else {
+		// 发送 MsgApp 类型的消息
 		m.Type = pb.MsgApp
 		m.Index = pr.Next - 1
 		m.LogTerm = term
 		m.Entries = ents
+		// Commit 代表目前已经commit 的index，让follower进行操作
 		m.Commit = r.raftLog.committed
 		if n := len(m.Entries); n != 0 {
 			switch pr.State {
@@ -519,6 +525,7 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
 // according to the progress recorded in r.prs.
 func (r *raft) bcastAppend() {
+	// 遍历每个peer。发送提案消息
 	r.prs.Visit(func(id uint64, _ *tracker.Progress) {
 		if id == r.id {
 			return
@@ -588,7 +595,9 @@ func (r *raft) advance(rd Ready) {
 // maybeCommit attempts to advance the commit index. Returns true if
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
+// 尝试判断是否可以将 commit index 推进，如果有变化就返回true，让调用方调用 bcastAppend
 func (r *raft) maybeCommit() bool {
+	// 从 prs 中取 commited index
 	mci := r.prs.Committed()
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
@@ -628,6 +637,7 @@ func (r *raft) reset(term uint64) {
 
 func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 	li := r.raftLog.lastIndex()
+	// 设置 entry 的 term 和 index，从当前raftlog的最后一个index开始
 	for i := range es {
 		es[i].Term = r.Term
 		es[i].Index = li + 1 + uint64(i)
@@ -642,6 +652,7 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 		return false
 	}
 	// use latest "last" index after truncate/append
+	// 加入到unstable中
 	li = r.raftLog.append(es...)
 	r.prs.Progress[r.id].MaybeUpdate(li)
 	// Regardless of maybeCommit's return, our caller will call bcastAppend.
@@ -1071,6 +1082,7 @@ func stepLeader(r *raft, m pb.Message) error {
 		})
 		return nil
 	case pb.MsgProp:
+		// 收到本地或者其他follower传来的Prop消息
 		if len(m.Entries) == 0 {
 			r.logger.Panicf("%x stepped empty MsgProp", r.id)
 		}
@@ -1084,7 +1096,7 @@ func stepLeader(r *raft, m pb.Message) error {
 			r.logger.Debugf("%x [term %d] transfer leadership to %x is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
 			return ErrProposalDropped
 		}
-
+		// 每条处理，处理配置变更
 		for i := range m.Entries {
 			e := &m.Entries[i]
 			var cc pb.ConfChangeI
@@ -1123,10 +1135,11 @@ func stepLeader(r *raft, m pb.Message) error {
 				}
 			}
 		}
-
+		// 添加entiry到unstable中
 		if !r.appendEntry(m.Entries...) {
 			return ErrProposalDropped
 		}
+		// 进行广播
 		r.bcastAppend()
 		return nil
 	case pb.MsgReadIndex:
@@ -1158,9 +1171,11 @@ func stepLeader(r *raft, m pb.Message) error {
 	}
 	switch m.Type {
 	case pb.MsgAppResp:
+		// 接收到 follower 的 MsgAppResp 消息
 		pr.RecentActive = true
-
+		// 收到节点的MsgAppResp消息，说明该节点是活跃的，因此保存节点状态的RecentActive成员置为true。
 		if m.Reject {
+			// 被拒绝了
 			// RejectHint is the suggested next base entry for appending (i.e.
 			// we try to append entry RejectHint+1 next), and LogTerm is the
 			// term that the follower has at index RejectHint. Older versions
@@ -1184,6 +1199,15 @@ func stepLeader(r *raft, m pb.Message) error {
 			r.logger.Debugf("%x received MsgAppResp(rejected, hint: (index %d, term %d)) from %x for index %d",
 				r.id, m.RejectHint, m.LogTerm, m.From, m.Index)
 			nextProbeIdx := m.RejectHint
+			/**
+			leader前面认为从日志索引为10的位置开始向节点A同步数据，但是节点A拒绝了这次数据同步，同时返回RejectHint为2，
+			说明节点A告知leader在它上面保存的最大日志索引ID为2，这样下一次leader就可以直接从索引为2的日志数据开始同步数据到节点A。
+			而如果没有这个RejectHint成员，leader只能在每次被拒绝数据同步后都递减1进行下一次数据同步，显然这样是低效的。
+
+			因为上面节点拒绝了这次数据同步，所以节点的状态可能存在一些异常，此时如果leader上保存的节点状态为ProgressStateReplicate，那么将切换到ProgressStateProbe状态（关于这几种状态，下面会谈到）。
+
+			前面已经按照msg.RejectHint修改了leader上关于该节点日志状态的索引数据，接着再次尝试按照这个新的索引数据向该节点再次同步数据。
+			 */
 			if m.LogTerm > 0 {
 				// If the follower has an uncommitted log tail, we would end up
 				// probing one by one until we hit the common prefix.
@@ -1279,21 +1303,35 @@ func stepLeader(r *raft, m pb.Message) error {
 				//    7, the rejection points it at the end of the follower's log
 				//    which is at a higher log term than the actually committed
 				//    log.
+				// 下一次同步的index
 				nextProbeIdx = r.raftLog.findConflictByTerm(m.RejectHint, m.LogTerm)
 			}
+			// 记录同步的index
 			if pr.MaybeDecrTo(m.Index, nextProbeIdx) {
 				r.logger.Debugf("%x decreased progress of %x to [%s]", r.id, m.From, pr)
 				if pr.State == tracker.StateReplicate {
 					pr.BecomeProbe()
 				}
+				// 再次发送append
 				r.sendAppend(m.From)
 			}
 		} else {
+			// follower 接受了 AppMsg
 			oldPaused := pr.IsPaused()
+			// 交给 pr 进行跟踪统计，查看是否是超时的消息
+			// 根据msg.Index来判断在leader中保存的该节点日志数据索引是否发生了更新，如果发生了更新那么就说明这个节点通过了新的数据
 			if pr.MaybeUpdate(m.Index) {
+				// 根据 pr 的状态，切换 pr 也就是对应 follower的状态
 				switch {
+				// 如果该节点之前在ProgressStateProbe状态，说明之前处于探测状态，此时可以切换到ProgressStateReplicate，开始正常的接收leader的同步数据了。
 				case pr.State == tracker.StateProbe:
 					pr.BecomeReplicate()
+				/**
+				如果之前处于ProgressStateSnapshot状态，即还在同步副本，说明节点之前可能落后leader数据比较多才采用了接收副本的状态。
+				这里还需要多做一点解释，因为在节点落后leader数据很多的情况下，可能leader会多次通过snapshot同步数据给节点，
+				而当 pr.Match >= pr.PendingSnapshot的时候，说明通过快照来同步数据的流程完成了，
+				这时可以进入正常的接收同步数据状态了，这就是函数Progress.needSnapshotAbort要做的判断
+				 */
 				case pr.State == tracker.StateSnapshot && pr.Match >= pr.PendingSnapshot:
 					// TODO(tbg): we should also enter this branch if a snapshot is
 					// received that is below pr.PendingSnapshot but which makes it
@@ -1307,15 +1345,24 @@ func stepLeader(r *raft, m pb.Message) error {
 					pr.BecomeProbe()
 					pr.BecomeReplicate()
 				case pr.State == tracker.StateReplicate:
+					// 前处于ProgressStateReplicate状态，此时可以修改leader关于这个节点的滑动窗口索引，释放掉这部分数据索引，好让节点可以接收新的数据了。
 					pr.Inflights.FreeLE(m.Index)
 				}
 
+				/**
+				判断是否有新的数据可以提交（commit）了。因为raft的提交数据的流程是这样的：首先节点将数据提议（propose）给leader，
+				leader在将数据写入到自己的日志成功之后，再通过MsgApp把这些提议的数据广播给集群中的其他节点，
+				在某一条日志数据收到超过半数（qurom）的节点同意之后，才认为是可以提交（commit）的。
+				因此每次leader节点在收到一条MsgAppResp类型消息，同时msg.Reject又是false的情况下，都需要去检查当前有哪些日志是超过半数的节点同意的，
+				再将这些可以提交（commit）的数据广播出去
+				 */
 				if r.maybeCommit() {
 					// committed index has progressed for the term, so it is safe
 					// to respond to pending read index requests
 					releasePendingReadIndexMessages(r)
 					r.bcastAppend()
 				} else if oldPaused {
+					// 如果之前节点处于暂停状态，那么将继续向该节点同步数据。
 					// If we were paused before, this node may be missing the
 					// latest commit index, so send it.
 					r.sendAppend(m.From)
@@ -1329,6 +1376,10 @@ func stepLeader(r *raft, m pb.Message) error {
 				for r.maybeSendAppend(m.From, false) {
 				}
 				// Transfer leadership is in progress.
+				/**
+				。如果该消息节点是准备迁移过去的新leader节点（raft.leadTransferee == msg.From），
+				而且此时该节点上的Match索引已经跟旧的leader的日志最大索引一致，说明新旧节点的日志数据已经同步，可以正式进行集群leader迁移操作
+				 */
 				if m.From == r.leadTransferee && pr.Match == r.raftLog.lastIndex() {
 					r.logger.Infof("%x sent MsgTimeoutNow to %x after received MsgAppResp", r.id, m.From)
 					r.sendTimeoutNow(m.From)
@@ -1480,20 +1531,26 @@ func stepCandidate(r *raft, m pb.Message) error {
 	}
 	return nil
 }
-
+// follower 的 step 操作
 func stepFollower(r *raft, m pb.Message) error {
 	switch m.Type {
 	case pb.MsgProp:
+		// 当集群没有leader时，直接报错
 		if r.lead == None {
 			r.logger.Infof("%x no leader at term %d; dropping proposal", r.id, r.Term)
 			return ErrProposalDropped
 		} else if r.disableProposalForwarding {
+			// 当集群有leader但是不接受转发时，返回错误
 			r.logger.Infof("%x not forwarding to leader %x at term %d; dropping proposal", r.id, r.lead, r.Term)
 			return ErrProposalDropped
 		}
 		m.To = r.lead
+		// 需要通过应用层发送给leader
 		r.send(m)
 	case pb.MsgApp:
+		// 接受到leader发来的 App 消息
+		// 将监听leader超时时间设置为0
+		// 将自己的leader设置为App的From
 		r.electionElapsed = 0
 		r.lead = m.From
 		r.handleAppendEntries(m)
@@ -1537,11 +1594,13 @@ func stepFollower(r *raft, m pb.Message) error {
 
 func (r *raft) handleAppendEntries(m pb.Message) {
 	if m.Index < r.raftLog.committed {
+		// 小于自己的commited可以直接返回了
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})
 		return
 	}
-
+	// 将entry 添加到 unstable，然后发送给返回信息
 	if mlastIndex, ok := r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
+		// 发送 MsgAppResq 消息，同意消息
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
 	} else {
 		r.logger.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
@@ -1566,7 +1625,7 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 			To:         m.From,
 			Type:       pb.MsgAppResp,
 			Index:      m.Index,
-			Reject:     true,
+			Reject:     true, // 拒绝消息
 			RejectHint: hintIndex,
 			LogTerm:    hintTerm,
 		})

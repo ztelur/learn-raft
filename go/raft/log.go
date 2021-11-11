@@ -112,14 +112,16 @@ func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry
 			l.logger.Panicf("entry %d conflict with committed entry [committed(%d)]", ci, l.committed)
 		default:
 			offset := index + 1
+			// 加到 unstable 中
 			l.append(ents[ci-offset:]...)
 		}
+		// 设置需要被提交的
 		l.commitTo(min(committed, lastnewi))
 		return lastnewi, true
 	}
 	return 0, false
 }
-
+// 添加 unstable 的 entry
 func (l *raftLog) append(ents ...pb.Entry) uint64 {
 	if len(ents) == 0 {
 		return l.lastIndex()
@@ -188,12 +190,14 @@ func (l *raftLog) unstableEntries() []pb.Entry {
 	if len(l.unstable.entries) == 0 {
 		return nil
 	}
+	// 从 unstable 中获取需要持久化的消息
 	return l.unstable.entries
 }
 
 // nextEnts returns all the available entries for execution.
 // If applied is smaller than the index of snapshot, it returns all committed
 // entries after the index of snapshot.
+// 需要应用到状态机的消息，使用  commited index 来进行分割
 func (l *raftLog) nextEnts() (ents []pb.Entry) {
 	off := max(l.applied+1, l.firstIndex())
 	if l.committed+1 > off {
@@ -246,7 +250,7 @@ func (l *raftLog) lastIndex() uint64 {
 	}
 	return i
 }
-
+// 设置commit index
 func (l *raftLog) commitTo(tocommit uint64) {
 	// never decrease commit
 	if l.committed < tocommit {

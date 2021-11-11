@@ -241,7 +241,7 @@ func StartNode(c *Config, peers []Peer) Node {
 	rn.Bootstrap(peers)
 
 	n := newNode(rn)
-
+	// 启动node时，会调用run函数
 	go n.run()
 	return &n
 }
@@ -311,7 +311,7 @@ func (n *node) Stop() {
 	// Block until the stop has been acknowledged by run()
 	<-n.done
 }
-
+// node 的处理分发函数
 func (n *node) run() {
 	var propc chan msgWithResult
 	var readyc chan Ready
@@ -323,6 +323,8 @@ func (n *node) run() {
 	lead := None
 
 	for {
+		// 一开始 advancec 一定是 null，
+		// 当有 advancec 时，不处理 readyc
 		if advancec != nil {
 			readyc = nil
 		} else if n.rn.HasReady() {
@@ -338,7 +340,10 @@ func (n *node) run() {
 			readyc = n.readyc
 		}
 
+		// 如果自己不是leader。
+		// 注意，第一次进入时，leader是None所以一定会进入该分支
 		if lead != r.lead {
+			// 集群有leader，则能接受提案，但是后续要转发给leaer
 			if r.hasLeader() {
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
@@ -347,6 +352,7 @@ func (n *node) run() {
 				}
 				propc = n.propc
 			} else {
+				// 没有leader，不能接受提案
 				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
 				propc = nil
 			}
@@ -358,9 +364,11 @@ func (n *node) run() {
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
 		case pm := <-propc:
+			// 接受提案
 			m := pm.m
 			m.From = r.id
 			err := r.Step(m)
+			// 通知到 result
 			if pm.result != nil {
 				pm.result <- err
 				close(pm.result)
@@ -404,7 +412,9 @@ func (n *node) run() {
 		case <-n.tickc:
 			n.rn.Tick()
 		case readyc <- rd:
+			// 这一轮，将 ready 结构体加入到 readyc 中
 			n.rn.acceptReady(rd)
+			// 然后设置 advancec ，在下一轮就等待应用层的处理结果
 			advancec = n.advancec
 		case <-advancec:
 			n.rn.Advance(rd)
@@ -485,12 +495,14 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 			return ErrStopped
 		}
 	}
+	// 单独处理 MsgPro类型的
 	ch := n.propc
 	pm := msgWithResult{m: m}
 	if wait {
 		pm.result = make(chan error, 1)
 	}
 	select {
+	// 将msgWithResult发送到 channel 中，如果不等待，则直接返回
 	case ch <- pm:
 		if !wait {
 			return nil
@@ -500,7 +512,9 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 	case <-n.done:
 		return ErrStopped
 	}
+	// 需要等待的逻辑
 	select {
+	// 等待 pm 中的 result 返回，如果不为null，则正常返回
 	case err := <-pm.result:
 		if err != nil {
 			return err
@@ -575,11 +589,13 @@ func (n *node) ReadIndex(ctx context.Context, rctx []byte) error {
 }
 
 func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
+	// 构造新的 Ready 数据体
 	rd := Ready{
-		Entries:          r.raftLog.unstableEntries(),
-		CommittedEntries: r.raftLog.nextEnts(),
-		Messages:         r.msgs,
+		Entries:          r.raftLog.unstableEntries(), // 需要持久化的消息
+		CommittedEntries: r.raftLog.nextEnts(), // 需要应用到状态机器的消息
+		Messages:         r.msgs, // 需要通过网络请求发送的消息
 	}
+	// 设置软硬状态
 	if softSt := r.softState(); !softSt.equal(prevSoftSt) {
 		rd.SoftState = softSt
 	}

@@ -141,8 +141,10 @@ func (pr *Progress) BecomeSnapshot(snapshoti uint64) {
 // MaybeUpdate is called when an MsgAppResp arrives from the follower, with the
 // index acked by it. The method returns false if the given n index comes from
 // an outdated message. Otherwise it updates the progress and returns true.
+// 当接收到 follower 的 MsgAppResp 函数时调用。 当 index 已经过时了就返回false，否则会更新进度并返回true
 func (pr *Progress) MaybeUpdate(n uint64) bool {
 	var updated bool
+	//
 	if pr.Match < n {
 		pr.Match = n
 		updated = true
