@@ -241,6 +241,7 @@ func (l *raftLog) firstIndex() uint64 {
 }
 
 func (l *raftLog) lastIndex() uint64 {
+	// 先从 unstable 取，然后再从 storage 取
 	if i, ok := l.unstable.maybeLastIndex(); ok {
 		return i
 	}
@@ -367,6 +368,7 @@ func (l *raftLog) slice(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 		return nil, nil
 	}
 	var ents []pb.Entry
+	// lo 小于 unstable.offset 说明都是从已经持久化的storage中取数据
 	if lo < l.unstable.offset {
 		storedEnts, err := l.storage.Entries(lo, min(hi, l.unstable.offset), maxSize)
 		if err == ErrCompacted {
@@ -384,6 +386,7 @@ func (l *raftLog) slice(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 
 		ents = storedEnts
 	}
+	// hi 大于 unstable.offset 则说明需要从unstable取数据
 	if hi > l.unstable.offset {
 		unstable := l.unstable.slice(max(lo, l.unstable.offset), hi)
 		if len(ents) > 0 {

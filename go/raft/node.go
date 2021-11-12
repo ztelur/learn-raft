@@ -417,6 +417,7 @@ func (n *node) run() {
 			// 然后设置 advancec ，在下一轮就等待应用层的处理结果
 			advancec = n.advancec
 		case <-advancec:
+			// 说明应用层处理完了本次的ready
 			n.rn.Advance(rd)
 			rd = Ready{}
 			advancec = nil
@@ -483,7 +484,7 @@ func (n *node) stepWait(ctx context.Context, m pb.Message) error {
 // if any.
 // 带等待的step，会一直等到处理结束才返回
 func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) error {
-	// 如果不是舔，则直接处理
+	// 如果不是Prop则，则直接处理
 	if m.Type != pb.MsgProp {
 		select {
 		// 发给 recvc
@@ -529,8 +530,10 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 
 func (n *node) Ready() <-chan Ready { return n.readyc }
 
+// 通知readyc中已经处理完，可以进行下一步操作
 func (n *node) Advance() {
 	select {
+	// 通知到advancec，会影响run函数中的逻辑
 	case n.advancec <- struct{}{}:
 	case <-n.done:
 	}
@@ -595,6 +598,7 @@ func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
 		CommittedEntries: r.raftLog.nextEnts(), // 需要应用到状态机器的消息
 		Messages:         r.msgs, // 需要通过网络请求发送的消息
 	}
+	// raft库中将未持久化数据塞到了Entries数组中，而已经达成一致可以提交的日志数据放入到CommittedEntries数组中。
 	// 设置软硬状态
 	if softSt := r.softState(); !softSt.equal(prevSoftSt) {
 		rd.SoftState = softSt

@@ -492,16 +492,20 @@ func (rc *raftNode) serveChannels() {
 			// 获取到未提交的提案
 			// 将其保存到 wal
 			// 将新的提案保存到本地
+			// rc.wal.Save(rd.HardState, rd.Entries)：将客户端提交数据的数据写入wal中。
 			rc.wal.Save(rd.HardState, rd.Entries)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				rc.saveSnap(rd.Snapshot)
 				rc.raftStorage.ApplySnapshot(rd.Snapshot)
 				rc.publishSnapshot(rd.Snapshot)
 			}
+			// rc.raftStorage.Append(rd.Entries)：这里的raftStorage即前面提到的持久化数据缓冲区的Storage接口，由MemoryStorage接口实现，这一步将这些客户端提交的数据也写入持久化缓冲区的内部映像。
 			rc.raftStorage.Append(rd.Entries)
 			// 将新的提案发送给其他node
+			// 这里是否是一定要先写后发？？？？这里是流程的关键处，要先写后发，否则将会出现问题
 			rc.transport.Send(rd.Messages)
 			// 将提交的应用到上层状态机中
+			// 第一步调用entriesToApply是要从已达成一致的日志数据中过滤出真正可以进行apply的日志，因为里面的一些日志可能已经被应用层apply过，第二步将第一步过滤出来的日志数据通知给应用层
 			applyDoneC, ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries))
 			if !ok {
 				rc.stop()

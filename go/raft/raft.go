@@ -552,7 +552,7 @@ func (r *raft) bcastHeartbeatWithCtx(ctx []byte) {
 		r.sendHeartbeat(id, ctx)
 	})
 }
-
+// 应用层处理完ready后的推进
 func (r *raft) advance(rd Ready) {
 	r.reduceUncommittedSize(rd.CommittedEntries)
 
@@ -560,6 +560,7 @@ func (r *raft) advance(rd Ready) {
 	// the next Ready. Note that if the current HardState contains a
 	// new Commit index, this does not mean that we're also applying
 	// all of the new entries due to commit pagination by size.
+	// 调整 applied index
 	if newApplied := rd.appliedCursor(); newApplied > 0 {
 		oldApplied := r.raftLog.applied
 		r.raftLog.appliedTo(newApplied)
@@ -582,7 +583,7 @@ func (r *raft) advance(rd Ready) {
 			r.logger.Infof("initiating automatic transition out of joint configuration %s", r.prs.Config)
 		}
 	}
-
+	// 将持久化的entry从unstable转移到storage
 	if len(rd.Entries) > 0 {
 		e := rd.Entries[len(rd.Entries)-1]
 		r.raftLog.stableTo(e.Index, e.Term)
@@ -654,6 +655,7 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 	// use latest "last" index after truncate/append
 	// 加入到unstable中
 	li = r.raftLog.append(es...)
+	// 自己投自己票
 	r.prs.Progress[r.id].MaybeUpdate(li)
 	// Regardless of maybeCommit's return, our caller will call bcastAppend.
 	r.maybeCommit()
