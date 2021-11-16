@@ -267,7 +267,7 @@ pub struct RaftCore<T: Storage> {
 pub struct Raft<T: Storage> {
     prs: ProgressTracker,
 
-    /// The list of messages.
+    /// The list of messages. 需要通过http发送的消息
     pub msgs: Vec<Message>,
     /// Internal raftCore.
     pub r: RaftCore<T>,
@@ -602,6 +602,7 @@ impl<T: Storage> RaftCore<T> {
             to = m.to;
             "msg" => ?m,
         );
+        // 带上自己的id
         if m.from == INVALID_ID {
             m.from = self.id;
         }
@@ -630,6 +631,7 @@ impl<T: Storage> RaftCore<T> {
                 );
             }
         } else {
+            // 上述类型之外的类型不应该发送 term 信息？？？？
             if m.term != 0 {
                 fatal!(
                     self.logger,
@@ -645,6 +647,7 @@ impl<T: Storage> RaftCore<T> {
             if m.get_msg_type() != MessageType::MsgPropose
                 && m.get_msg_type() != MessageType::MsgReadIndex
             {
+                // 当不是提案和ReadIndex时，设置上自己的 term
                 m.term = self.term;
             }
         }
@@ -653,6 +656,7 @@ impl<T: Storage> RaftCore<T> {
         {
             m.priority = self.priority;
         }
+        // 添加到
         msgs.push(m);
     }
 
@@ -705,7 +709,7 @@ impl<T: Storage> RaftCore<T> {
         );
         true
     }
-
+    // 给 message 添加必须的字段，包括index，term，commit和msg
     fn prepare_send_entries(
         &mut self,
         m: &mut Message,
@@ -720,6 +724,9 @@ impl<T: Storage> RaftCore<T> {
         m.commit = self.raft_log.committed;
         if !m.entries.is_empty() {
             let last = m.entries.last().unwrap().index;
+            /// 内部会直接修改对目标副本的 next_idex值，
+            /// 这样，后续的 MsgAppend 便可以在此基础上继续发送了。
+            /// 而一旦之前的 MsgAppend 被该目标副本拒绝掉了，也可以通过上一节中介绍的 maybe_decr_to机制将 next_idx重置为正确的值
             pr.update_state(last);
         }
     }
@@ -789,16 +796,21 @@ impl<T: Storage> RaftCore<T> {
                 return false;
             }
         } else {
+            // 从 next_idx 向后取一定的ents
             let ents = self.raft_log.entries(pr.next_idx, self.max_msg_size);
+            // 如果不允许空，并且ents是空，则直接返回
             if !allow_empty && ents.as_ref().ok().map_or(true, |e| e.is_empty()) {
                 return false;
             }
+            // 获得任期
             let term = self.raft_log.term(pr.next_idx - 1);
             match (term, ents) {
                 (Ok(term), Ok(mut ents)) => {
+                    // 进行批量操作
                     if self.batch_append && self.try_batching(to, msgs, pr, &mut ents) {
                         return true;
                     }
+                    // 给m添加所需的参数
                     self.prepare_send_entries(&mut m, pr, term, ents)
                 }
                 _ => {
@@ -809,6 +821,7 @@ impl<T: Storage> RaftCore<T> {
                 }
             }
         }
+        // 真正进行发送
         self.send(m, msgs);
         true
     }
@@ -1026,6 +1039,7 @@ impl<T: Storage> Raft<T> {
 
     /// Returns true to indicate that there will probably be some readiness need to be handled.
     pub fn tick(&mut self) -> bool {
+        // 根据状态进行不同的操作
         match self.state {
             StateRole::Follower | StateRole::PreCandidate | StateRole::Candidate => {
                 self.tick_election()
@@ -1040,11 +1054,13 @@ impl<T: Storage> Raft<T> {
     /// Returns true to indicate that there will probably be some readiness need to be handled.
     pub fn tick_election(&mut self) -> bool {
         self.election_elapsed += 1;
+        // 如果尚未超时，则暂时不处理
         if !self.pass_election_timeout() || !self.promotable {
             return false;
         }
 
         self.election_elapsed = 0;
+        // 给自己发送 Hup 消息
         let m = new_message(INVALID_ID, MessageType::MsgHup, Some(self.id));
         let _ = self.step(m);
         true
@@ -1072,7 +1088,7 @@ impl<T: Storage> Raft<T> {
         if self.state != StateRole::Leader {
             return has_ready;
         }
-
+        // 发送心跳msg
         if self.heartbeat_elapsed >= self.heartbeat_timeout {
             self.heartbeat_elapsed = 0;
             has_ready = true;
@@ -1217,17 +1233,22 @@ impl<T: Storage> Raft<T> {
     // Campaign to attempt to become a leader.
     //
     // If prevote is enabled, this is handled as well.
+    // 进行选举
     #[doc(hidden)]
     pub fn campaign(&mut self, campaign_type: &'static [u8]) {
+        // rust 的语法这样是比较搞
         let (vote_msg, term) = if campaign_type == CAMPAIGN_PRE_ELECTION {
+            // 成为pre candidate状态
             self.become_pre_candidate();
             // Pre-vote RPCs are sent for next term before we've incremented self.term.
+            // 注意 pre 时需要 + 1
             (MessageType::MsgRequestPreVote, self.term + 1)
         } else {
             self.become_candidate();
             (MessageType::MsgRequestVote, self.term)
         };
         let self_id = self.id;
+        // 自己给自己投票，查看是不是直接就达到半数，说明时单节点
         if VoteResult::Won == self.poll(self_id, vote_msg, true) {
             // We won the election after voting for ourselves (which must mean that
             // this is a single-node cluster).
@@ -1239,8 +1260,10 @@ impl<T: Storage> Raft<T> {
         let mut voter_cnt = 0;
 
         // Only send vote request to voters.
+        // 给所有的有投票权的发送消息
         for id in self.prs.conf().voters().ids().iter() {
             if id == self_id {
+                // 自己投过了
                 continue;
             }
 
@@ -1251,6 +1274,7 @@ impl<T: Storage> Raft<T> {
             voters[voter_cnt] = id;
             voter_cnt += 1;
             let mut m = new_message(id, vote_msg, None);
+            // 带上term，index等数据
             m.term = term;
             m.index = self.raft_log.last_index();
             m.log_term = self.raft_log.last_term();
@@ -1293,6 +1317,7 @@ impl<T: Storage> Raft<T> {
                 let in_lease = self.check_quorum
                     && self.leader_id != INVALID_ID
                     && self.election_elapsed < self.election_timeout;
+                // 特殊情况，直接返回
                 if !force && in_lease {
                     // if a server receives RequestVote request within the minimum election
                     // timeout of hearing from a current leader, it does not update its term
@@ -1345,6 +1370,7 @@ impl<T: Storage> Raft<T> {
                     || m.get_msg_type() == MessageType::MsgHeartbeat
                     || m.get_msg_type() == MessageType::MsgSnapshot
                 {
+                    // 如果收到了一些leader发送过来的消息，则成为follower
                     self.become_follower(m.term, m.from);
                 } else {
                     self.become_follower(m.term, INVALID_ID);
@@ -1395,7 +1421,7 @@ impl<T: Storage> Raft<T> {
                     m.index,
                     self.term,
                 );
-
+                // 只需要简单的进行回复即可，直接拒绝
                 let mut to_send = new_message(m.from, MessageType::MsgRequestPreVoteResponse, None);
                 to_send.term = self.term;
                 to_send.reject = true;
@@ -1418,7 +1444,9 @@ impl<T: Storage> Raft<T> {
         fail_point!("before_step");
 
         match m.get_msg_type() {
+            // follower 超时需要进行选举相关操作时
             MessageType::MsgHup => self.hup(false),
+            // 处理预投票
             MessageType::MsgRequestVote | MessageType::MsgRequestPreVote => {
                 // We can vote if this is a repeat of a vote we've already cast...
                 let can_vote = (self.vote == m.from) ||
@@ -1427,6 +1455,7 @@ impl<T: Storage> Raft<T> {
                     // ...or this is a PreVote for a future term...
                     (m.get_msg_type() == MessageType::MsgRequestPreVote && m.term > self.term);
                 // ...and we believe the candidate is up to date.
+                // 是否可以投票，并且对应的index和log_term需要符合条件
                 if can_vote
                     && self.raft_log.is_up_to_date(m.index, m.log_term)
                     && (m.index > self.raft_log.last_index() || self.priority <= m.priority)
@@ -1445,13 +1474,16 @@ impl<T: Storage> Raft<T> {
                         new_message(m.from, vote_resp_msg_type(m.get_msg_type()), None);
                     to_send.reject = false;
                     to_send.term = m.term;
+                    // 发送返回值
                     self.r.send(to_send, &mut self.msgs);
                     if m.get_msg_type() == MessageType::MsgRequestVote {
                         // Only record real votes.
+                        // 记录投票信息
                         self.election_elapsed = 0;
                         self.vote = m.from;
                     }
                 } else {
+                    // 投反对票
                     self.log_vote_reject(&m);
                     let mut to_send =
                         new_message(m.from, vote_resp_msg_type(m.get_msg_type()), None);
@@ -1464,6 +1496,7 @@ impl<T: Storage> Raft<T> {
                     self.maybe_commit_by_vote(&m);
                 }
             }
+            // 根据当前的状态，调用不同的函数
             _ => match self.state {
                 StateRole::PreCandidate | StateRole::Candidate => self.step_candidate(m)?,
                 StateRole::Follower => self.step_follower(m)?,
@@ -1486,6 +1519,7 @@ impl<T: Storage> Raft<T> {
         // `maybe_first_index`. Note that snapshot updates configuration
         // already, so as long as pending entries don't contain conf change
         // it's safe to start campaign.
+        // 获取当前最大的index
         let first_index = match self.raft_log.unstable.maybe_first_index() {
             Some(idx) => idx,
             None => self.raft_log.applied + 1,
@@ -1504,6 +1538,7 @@ impl<T: Storage> Raft<T> {
                 );
             });
         let n = self.num_pending_conf(&ents);
+        // 查看目前剩余的ents中是否有尚未处理的conf事件，如果有则不处理
         if n != 0 {
             warn!(
                 self.logger,
@@ -1519,6 +1554,7 @@ impl<T: Storage> Raft<T> {
             "starting a new election";
             "term" => self.term,
         );
+        // 三种，转移leader，预投票和选举
         if transfer_leader {
             self.campaign(CAMPAIGN_TRANSFER);
         } else if self.pre_vote {
@@ -1559,7 +1595,7 @@ impl<T: Storage> Raft<T> {
             "msg type" => ?m.get_msg_type(),
         );
     }
-
+    // 处理 MsgAppResp 类型的参数
     fn handle_append_response(&mut self, m: &Message) {
         let mut next_probe_index: u64 = m.reject_hint;
         // pull out find_conflict_by_term for immutable borrow
@@ -1709,7 +1745,7 @@ impl<T: Storage> Raft<T> {
                 "from" => m.from,
                 "index" => m.index,
             );
-
+            // 将副本对应的 `next_idx` 回退到一个合适的值
             if pr.maybe_decr_to(m.index, next_probe_index, m.request_snapshot) {
                 debug!(
                     self.r.logger,
@@ -1726,6 +1762,7 @@ impl<T: Storage> Raft<T> {
         }
 
         let old_paused = pr.is_paused();
+        // 将副本对应的 `next_idx` 设置为 `m.get_index() + 1`
         if !pr.maybe_update(m.index) {
             return;
         }
@@ -1743,9 +1780,10 @@ impl<T: Storage> Raft<T> {
                     pr.become_probe();
                 }
             }
+            // 使窗口向前滑动
             ProgressState::Replicate => pr.ins.free_to(m.get_index()),
         }
-
+        // 判断是否可以提交
         if self.maybe_commit() {
             if self.should_bcast_commit() {
                 self.bcast_append()
@@ -1762,6 +1800,7 @@ impl<T: Storage> Raft<T> {
         // replicate, or when freeTo() covers multiple messages). If
         // we have more entries to send, send as many messages as we
         // can (without sending empty messages for the commit index)
+        //
         while self.r.maybe_send_append(m.from, pr, false, &mut self.msgs) {}
 
         // Transfer leadership is in progress.
@@ -1956,7 +1995,7 @@ impl<T: Storage> Raft<T> {
             "progress" => ?pr,
         );
     }
-
+    // leader 状态的 step 函数
     fn step_leader(&mut self, mut m: Message) -> Result<()> {
         // These message types do not require any progress for m.From.
         match m.get_msg_type() {
@@ -1975,16 +2014,20 @@ impl<T: Storage> Raft<T> {
                 }
                 return Ok(());
             }
+            // leader来处理提案消息
             MessageType::MsgPropose => {
+                // 不允许空的 Propose
                 if m.entries.is_empty() {
                     fatal!(self.logger, "stepped empty MsgProp");
                 }
+                // 检查自身状态
                 if !self.prs.progress().contains_key(&self.id) {
                     // If we are not currently a member of the range (i.e. this node
                     // was removed from the configuration while serving as leader),
                     // drop any new proposals.
                     return Err(Error::ProposalDropped);
                 }
+                // 正在进行leader交接
                 if self.lead_transferee.is_some() {
                     debug!(
                         self.logger,
@@ -1998,6 +2041,7 @@ impl<T: Storage> Raft<T> {
 
                 for (i, e) in m.mut_entries().iter_mut().enumerate() {
                     let mut cc;
+                    // 特殊处理配置变更
                     if e.get_entry_type() == EntryType::EntryConfChange {
                         let mut cc_v1 = ConfChange::default();
                         if let Err(e) = cc_v1.merge_from_bytes(e.get_data()) {
@@ -2045,6 +2089,7 @@ impl<T: Storage> Raft<T> {
                         e.set_entry_type(EntryType::EntryNormal);
                     }
                 }
+                // 将其添加到unstable 可变引用，因为会赋予正确的  term 和 index
                 if !self.append_entry(&mut m.mut_entries()) {
                     // return ProposalDropped when uncommitted size limit is reached
                     debug!(
@@ -2054,6 +2099,7 @@ impl<T: Storage> Raft<T> {
                     );
                     return Err(Error::ProposalDropped);
                 }
+                // 广播
                 self.bcast_append();
                 return Ok(());
             }
@@ -2127,6 +2173,7 @@ impl<T: Storage> Raft<T> {
     }
 
     /// Commits the logs using commit info in vote message.
+    /// 优化，通过vote的信息来提交一些logs
     fn maybe_commit_by_vote(&mut self, m: &Message) {
         if m.commit == 0 || m.commit_term == 0 {
             return;
@@ -2168,7 +2215,9 @@ impl<T: Storage> Raft<T> {
     }
 
     fn poll(&mut self, from: u64, t: MessageType, vote: bool) -> VoteResult {
+        // 记录投票
         self.prs.record_vote(from, vote);
+        // 判断votes结果，同时返回同意和拒绝
         let (gr, rj, res) = self.prs.tally_votes();
         // Unlike etcd, we log when necessary.
         if from != self.id {
@@ -2186,6 +2235,7 @@ impl<T: Storage> Raft<T> {
 
         match res {
             VoteResult::Won => {
+                // 如果已经赢了，则进入对应的状态
                 if self.state == StateRole::PreCandidate {
                     self.campaign(CAMPAIGN_ELECTION);
                 } else {
@@ -2231,6 +2281,7 @@ impl<T: Storage> Raft<T> {
                 self.become_follower(m.term, m.from);
                 self.handle_snapshot(m);
             }
+            // 收到了其他peer返送的投票的response
             MessageType::MsgRequestPreVoteResponse | MessageType::MsgRequestVoteResponse => {
                 // Only handle vote responses corresponding to our candidacy (while in
                 // state Candidate, we may get stale MsgPreVoteResp messages in this term from
@@ -2242,8 +2293,9 @@ impl<T: Storage> Raft<T> {
                 {
                     return Ok(());
                 }
-
+                // 记录选票
                 self.poll(m.from, m.get_msg_type(), !m.reject);
+                // 进行提交
                 self.maybe_commit_by_vote(&m);
             }
             MessageType::MsgTimeoutNow => debug!(
@@ -2261,6 +2313,7 @@ impl<T: Storage> Raft<T> {
     fn step_follower(&mut self, mut m: Message) -> Result<()> {
         match m.get_msg_type() {
             MessageType::MsgPropose => {
+                // follower 是将消息发送给leader
                 if self.leader_id == INVALID_ID {
                     info!(
                         self.logger,
@@ -2272,7 +2325,9 @@ impl<T: Storage> Raft<T> {
                 m.to = self.leader_id;
                 self.r.send(m, &mut self.msgs);
             }
+            // 接收到 leader 的 MsgAppend 消息
             MessageType::MsgAppend => {
+                // 将超时时间归0，并设置自己的leader
                 self.election_elapsed = 0;
                 self.leader_id = m.from;
                 self.handle_append_entries(&m);
@@ -2390,11 +2445,13 @@ impl<T: Storage> Raft<T> {
 
     // TODO: revoke pub when there is a better way to test.
     /// For a given message, append the entries to the log.
+    /// 处理 MsgApp 消息
     pub fn handle_append_entries(&mut self, m: &Message) {
         if self.pending_request_snapshot != INVALID_INDEX {
             self.send_request_snapshot();
             return;
         }
+        // 本地已经有了
         if m.index < self.raft_log.committed {
             debug!(
                 self.logger,
@@ -2408,7 +2465,7 @@ impl<T: Storage> Raft<T> {
             self.r.send(to_send, &mut self.msgs);
             return;
         }
-
+        // 初始化返回数据 MsgAppResp
         let mut to_send = Message::default();
         to_send.to = m.from;
         to_send.set_msg_type(MessageType::MsgAppendResponse);
@@ -2417,6 +2474,7 @@ impl<T: Storage> Raft<T> {
             .raft_log
             .maybe_append(m.index, m.log_term, m.commit, &m.entries)
         {
+            // 追加日志成功，将最新的 last index 上报给 Leader
             to_send.set_index(last_idx);
         } else {
             debug!(
@@ -2441,6 +2499,7 @@ impl<T: Storage> Raft<T> {
                     index = hint_index
                 )
             }
+            // 追加日志失败，设置 reject 标志，并告诉 Leader 自己的 last index
 
             to_send.index = m.index;
             to_send.reject = true;
@@ -2502,7 +2561,10 @@ impl<T: Storage> Raft<T> {
 
     /// Recovers the state machine from a snapshot. It restores the log and the
     /// configuration of state machine.
+    ///     /// Follower 上收到 Snapshot 之后的处理逻辑 主要是 Raft::restore_raft和 RaftLog::restore两个函数
+    /// 前者中主要包含了对 Progress 的处理，因为 Snapshot 包含了 Leader 上最新的信息，而 Leader 上的 Configuration 是可能跟 Follower 不同的
     pub fn restore(&mut self, snap: Snapshot) -> bool {
+        ///         // 内部仅更新了 committed，并没有更新 applied。这是因为 raft-rs 仅关心 Raft 日志的部分，至于如何把日志中的内容更新到真正的状态机中，是应用程序的任务
         if snap.get_metadata().index < self.raft_log.committed {
             return false;
         }
@@ -2745,6 +2807,7 @@ impl<T: Storage> Raft<T> {
     }
 
     /// Regenerates and stores the election timeout.
+    /// 重新设置选举超时时间
     pub fn reset_randomized_election_timeout(&mut self) {
         let prev_timeout = self.randomized_election_timeout;
         let timeout =

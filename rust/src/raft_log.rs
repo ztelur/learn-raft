@@ -265,6 +265,7 @@ impl<T: Storage> RaftLog<T> {
                 )
             } else {
                 let start = (conflict_idx - (idx + 1)) as usize;
+                // 添加对应的数据
                 self.append(&ents[start..]);
                 // persisted should be decreased because entries are changed
                 if self.persisted > conflict_idx - 1 {
@@ -272,6 +273,7 @@ impl<T: Storage> RaftLog<T> {
                 }
             }
             let last_new_index = idx + ents.len() as u64;
+            // 进行提交
             self.commit_to(cmp::min(committed, last_new_index));
             return Some((conflict_idx, last_new_index));
         }
@@ -374,6 +376,7 @@ impl<T: Storage> RaftLog<T> {
                 self.committed
             )
         }
+        // 加入到 unstable中
         self.unstable.truncate_and_append(ents);
         self.last_index()
     }

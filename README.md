@@ -14,3 +14,8 @@ https://www.codedump.info/post/20180922-etcd-raft/
 https://www.jianshu.com/p/b2e6aedcb32e
 
 ### TiKV raft
+
+https://github.com/tikv/raft-rs
+
+
+https://pingcap.com/zh/blog/tikv-source-code-reading-2

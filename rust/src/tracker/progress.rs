@@ -4,11 +4,13 @@ use crate::{Inflights, ProgressState, INVALID_INDEX};
 use std::cmp;
 
 /// The progress of catching up from a restart.
+///
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
     /// How much state is matched.
     pub matched: u64,
     /// The next index to apply
+    /// 该副本期望接收的下一个 Entry 的 index
     pub next_idx: u64,
     /// When in ProgressStateProbe, leader sends at most one replication message
     /// per heartbeat interval. It also probes actual progress of the follower.
@@ -19,9 +21,13 @@ pub struct Progress {
     ///
     /// When in ProgressStateSnapshot, leader should have sent out snapshot
     /// before and stop sending any replication message.
+    /// ProgressState::Probe：Leader 每个心跳间隔中最多发送一条 MsgAppend
+    /// ProgressState::Replicate：Leader 在每个心跳间隔中可以发送多个 MsgAppend
+    /// ProgressState::Snapshot：Leader 无法再继续发送 MsgAppend 给这个副本
     pub state: ProgressState,
     /// Paused is used in ProgressStateProbe.
     /// When Paused is true, raft should pause sending replication message to this peer.
+    /// 是否暂停给这个副本发送 MsgAppend 了
     pub paused: bool,
     /// This field is used in ProgressStateSnapshot.
     /// If there is a pending snapshot, the pendingSnapshot will be set to the
@@ -46,6 +52,7 @@ pub struct Progress {
     /// into inflights in order.
     /// When a leader receives a reply, the previous inflights should
     /// be freed by calling inflights.freeTo.
+    /// 未 commit 的消息的滑动窗口
     pub ins: Inflights,
 
     /// Only logs replicated to different group will be committed if any group is configured.
@@ -138,6 +145,7 @@ impl Progress {
         let need_update = self.matched < n;
         if need_update {
             self.matched = n;
+            // 取消暂停的状态 收到了follower的返回值，取消 probe 状态
             self.resume();
         };
 
@@ -229,6 +237,7 @@ impl Progress {
     /// Update inflight msgs and next_idx
     pub fn update_state(&mut self, last: u64) {
         match self.state {
+            /// Pipeline 机制是由更新 next_idx的那一行引入
             ProgressState::Replicate => {
                 self.optimistic_update(last);
                 self.ins.add(last);

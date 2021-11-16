@@ -62,12 +62,16 @@ impl RaftState {
 /// If any Storage method returns an error, the raft instance will
 /// become inoperable and refuse to participate in elections; the
 /// application is responsible for cleanup and recovery in this case.
+/// 日志复制部分抽象了一个可以不断追加写入新日志的持久化数组，这一数组在 raft-rs 中即对应 Storage
+/// 这个 Storage 中并不包括持久化 Raft Log，也不会将 Raft Log 应用到应用程序自己的状态机的接口。
+///
 pub trait Storage {
     /// `initial_state` is called when Raft is initialized. This interface will return a `RaftState`
     /// which contains `HardState` and `ConfState`.
     ///
     /// `RaftState` could be initialized or not. If it's initialized it means the `Storage` is
     /// created with a configuration, and its last index and term should be greater than 0.
+    /// 获取这个 Raft 节点的初始化信息，比如 Raft group 中都有哪些成员等。这个方法在应用程序启动时会用到。
     fn initial_state(&self) -> Result<RaftState>;
 
     /// Returns a slice of log entries in the range `[low, high)`.
@@ -78,12 +82,14 @@ pub trait Storage {
     /// # Panics
     ///
     /// Panics if `high` is higher than `Storage::last_index(&self) + 1`.
+    /// 给定一个范围，获取这个范围内持久化之后的 Raft Log。
     fn entries(&self, low: u64, high: u64, max_size: impl Into<Option<u64>>) -> Result<Vec<Entry>>;
 
     /// Returns the term of entry idx, which must be in the range
     /// [first_index()-1, last_index()]. The term of the entry before
     /// first_index is retained for matching purpose even though the
     /// rest of that entry may not be available.
+    /// 给定一个日志的下标，查看这个位置的日志的 term。
     fn term(&self, idx: u64) -> Result<u64>;
 
     /// Returns the index of the first log entry that is possible available via entries, which will
@@ -91,9 +97,11 @@ pub trait Storage {
     ///
     /// New created (but not initialized) `Storage` can be considered as truncated at 0 so that 1
     /// will be returned in this case.
+    /// 由于数组中陈旧的日志会被清理掉，这个方法会返回数组中未被清理掉的最小的位置。
     fn first_index(&self) -> Result<u64>;
 
     /// The index of the last entry replicated in the `Storage`.
+    /// 返回数组中最后一条日志的位置。
     fn last_index(&self) -> Result<u64>;
 
     /// Returns the most recent snapshot.
@@ -102,6 +110,7 @@ pub trait Storage {
     /// so raft state machine could know that Storage needs some time to prepare
     /// snapshot and call snapshot later.
     /// A snapshot's index must not less than the `request_index`.
+    /// 返回一个 Snapshot，以便发送给日志落后过多的 Follower。
     fn snapshot(&self, request_index: u64) -> Result<Snapshot>;
 }
 

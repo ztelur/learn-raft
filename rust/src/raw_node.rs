@@ -87,19 +87,21 @@ pub fn is_empty_snap(s: &Snapshot) -> bool {
 #[derive(Default, Debug, PartialEq)]
 pub struct Ready {
     number: u64,
-
+    // 软信息
     ss: Option<SoftState>,
-
+    // Raft 相关的元信息更新，如当前的 term，投票结果，committed index 等等
     hs: Option<HardState>,
 
     read_states: Vec<ReadState>,
 
+    /// 	取出上一步发到 Raft 中，但尚未持久化的 Raft Log
+    /// 需要保存的日志。
     entries: Vec<Entry>,
 
     snapshot: Snapshot,
 
     is_persisted_msg: bool,
-
+    // 已经提交的log，需要应用到状态机
     light: LightReady,
 
     must_sync: bool,
@@ -241,7 +243,9 @@ struct ReadyRecord {
 #[derive(Default, Debug, PartialEq)]
 pub struct LightReady {
     commit_index: Option<u64>,
+    /// 取出已经持久化，并经过集群确认的 Raft Log。
     committed_entries: Vec<Entry>,
+    /// 取出 Raft 产生的消息，以便真正发给其他节点。
     messages: Vec<Message>,
 }
 
@@ -284,6 +288,7 @@ impl LightReady {
 /// RawNode is a thread-unsafe Node.
 /// The methods of this struct correspond to the methods of Node and are described
 /// more fully there.
+///  raft-rs 库与应用交互的主要界面
 pub struct RawNode<T: Storage> {
     /// The internal raft state.
     pub raft: Raft<T>,
@@ -339,6 +344,11 @@ impl<T: Storage> RawNode<T> {
     ///
     /// Returns true to indicate that there will probably be some readiness which
     /// needs to be handled.
+    /// 的作用是驱动 Raft 内部的逻辑时钟前进，并对超时进行处理。比如对于 Follower 而言，
+    /// 如果它在 tick 的时候发现 Leader 已经失联很久了，便会发起一次选举；
+    /// 而 Leader 为了避免自己被取代，也会在一个更短的超时之后给 Follower 发送心跳。
+    /// 值得注意的是，tick 也是会产生 Raft 消息的，为了使这部分 Raft 消息能够及时发送出去，
+    /// 在应用程序的每一轮循环中一般应该先处理 tick，然后处理 Ready，正如示例程序中所做的那样。
     pub fn tick(&mut self) -> bool {
         self.raft.tick()
     }
@@ -351,14 +361,24 @@ impl<T: Storage> RawNode<T> {
     }
 
     /// Propose proposes data be appended to the raft log.
+    ///  Raft 系统提交一个写入时，需要在 Leader 上调用该函数，然后会调用 step 函数
     pub fn propose(&mut self, context: Vec<u8>, data: Vec<u8>) -> Result<()> {
         let mut m = Message::default();
+        // MsgPropose
         m.set_msg_type(MessageType::MsgPropose);
         m.from = self.raft.id;
         let mut e = Entry::default();
         e.data = data.into();
         e.context = context.into();
         m.set_entries(vec![e].into());
+        ///当应用程序希望向 Raft 系统提交一个写入时，需要在 Leader 上调用 RawNode::propose方法，
+        /// 后者就会调用 RawNode::step，而参数是一个类型为 MessageType::MsgPropose的消息；
+        /// 应用程序要写入的内容被封装到了这个消息中。对于这一消息类型，后续会调用 Raft::step_leader函数，
+        /// 将这个消息作为一个 Raft Log 暂存起来，同时广播到 Follower 的信箱中。
+        /// 到这一步，propose 的过程就可以返回了，注意，此时这个 Raft Log 并没有持久化，
+        /// 同时广播给 Follower 的 MsgAppend 消息也并未真正发出去。应用程序需要设法将这个写入挂起，
+        /// 等到从 Raft 中获知这个写入已经被集群中的过半成员确认之后，再向这个写入的发起者返回写入成功的响应。
+        /// 那么， 如何能够让 Raft 把消息真正发出去，并接收 Follower 的确认呢？
         self.raft.step(m)
     }
 
@@ -399,6 +419,7 @@ impl<T: Storage> RawNode<T> {
     }
 
     /// Step advances the state machine using the given message.
+    /// 处理从该 Raft group 中其他节点收到的消息
     pub fn step(&mut self, m: Message) -> Result<()> {
         // Ignore unexpected local messages receiving over network
         if is_local_msg(m.get_msg_type()) {
@@ -425,7 +446,7 @@ impl<T: Storage> RawNode<T> {
             assert!(self.commit_since_index < e.get_index());
             self.commit_since_index = e.get_index();
         }
-
+        // 设置需要发送给其他peer的
         if !raft.msgs.is_empty() {
             rd.messages = mem::take(&mut raft.msgs);
         }
@@ -463,11 +484,12 @@ impl<T: Storage> RawNode<T> {
                 assert_eq!(record.snapshot, None);
             }
         }
-
+        // 赋值 soft_state，包括 leader_id 和 state
         let ss = raft.soft_state();
         if ss != self.prev_ss {
             rd.ss = Some(ss);
         }
+        // 赋值 hard_state，包括term,vote和committed index
         let hs = raft.hard_state();
         if hs != self.prev_hs {
             if hs.vote != self.prev_hs.vote || hs.term != self.prev_hs.term {
@@ -479,8 +501,9 @@ impl<T: Storage> RawNode<T> {
         if !raft.read_states.is_empty() {
             mem::swap(&mut rd.read_states, &mut raft.read_states);
         }
-
+        // 已经持久化的？
         if let Some(snapshot) = &raft.raft_log.unstable_snapshot() {
+            //
             rd.snapshot = snapshot.clone();
             assert!(self.commit_since_index <= rd.snapshot.get_metadata().index);
             self.commit_since_index = rd.snapshot.get_metadata().index;
@@ -500,6 +523,7 @@ impl<T: Storage> RawNode<T> {
             rd.must_sync = true;
         }
 
+        // 设置尚未持久化的entry
         rd.entries = raft.raft_log.unstable_entries().to_vec();
         if let Some(e) = rd.entries.last() {
             // If the last entry exists, the entries must not empty, vice versa.
@@ -510,6 +534,7 @@ impl<T: Storage> RawNode<T> {
         // Leader can send messages immediately to make replication concurrently.
         // For more details, check raft thesis 10.2.1.
         rd.is_persisted_msg = raft.state != StateRole::Leader;
+        // 设置已经提交的，和需要发送给其他服务的
         rd.light = self.gen_light_ready();
         self.records.push_back(rd_record);
         rd

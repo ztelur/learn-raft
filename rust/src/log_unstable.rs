@@ -141,6 +141,7 @@ impl Unstable {
     }
 
     /// From a given snapshot, restores the snapshot to self, but doesn't unpack.
+
     pub fn restore(&mut self, snap: Snapshot) {
         self.entries.clear();
         self.entries_size = 0;
@@ -172,6 +173,7 @@ impl Unstable {
             }
             self.entries.truncate((after - off) as usize);
         }
+        // 加入到 entries 中
         self.entries.extend_from_slice(ents);
         self.entries_size += ents
             .iter()

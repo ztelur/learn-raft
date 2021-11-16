@@ -65,16 +65,20 @@ fn main() {
         let logger = logger.clone();
         // Here we spawn the node on a new thread and keep a handle so we can join on them later.
         let handle = thread::spawn(move || loop {
+            // 睡眠
             thread::sleep(Duration::from_millis(10));
             loop {
                 // Step raft messages.
+                // 从my_mailbox中接收消息
                 match node.my_mailbox.try_recv() {
+                    // 处理收到的 Raft 消息
                     Ok(msg) => node.step(msg, &logger),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return,
                 }
             }
 
+            // 处理 optional
             let raft_group = match node.raft_group {
                 Some(ref mut r) => r,
                 // When Node::raft_group is `None` it means the node is not initialized.
@@ -92,9 +96,12 @@ fn main() {
                 // Handle new proposals.
                 let mut proposals = proposals.lock().unwrap();
                 for p in proposals.iter_mut().skip_while(|p| p.proposed > 0) {
+                    // 处理提案
                     propose(raft_group, p);
                 }
             }
+
+            /// 应用程序在 propose 一个消息之后，应该调用 RawNode::ready并在返回的 Ready 上继续进行处理：包括持久化 Raft Log，将 Raft 消息发送到网络上等
 
             // Handle readies from the raft.
             on_ready(
@@ -158,11 +165,15 @@ fn check_signals(receiver: &Arc<Mutex<mpsc::Receiver<Signal>>>) -> bool {
 
 struct Node {
     // None if the raft is not initialized.
+    // 持有一个 RawNode 实例
     raft_group: Option<RawNode<MemStorage>>,
+    // 接收其他节点发来的 Raft 消息
     my_mailbox: Receiver<Message>,
+    // 发送 Raft 消息给其他节点
     mailboxes: HashMap<u64, Sender<Message>>,
     // Key-value pairs after applied. `MemStorage` only contains raft logs,
     // so we need an additional storage engine.
+    // 实际的状态机
     kv_pairs: HashMap<u16, String>,
 }
 
@@ -247,11 +258,13 @@ fn on_ready(
     let store = raft_group.raft.raft_log.store.clone();
 
     // Get the `Ready` with `RawNode::ready` interface.
+    // 通过 ready 获取到对应的需要处理的数据
     let mut ready = raft_group.ready();
 
     let handle_messages = |msgs: Vec<Message>| {
         for msg in msgs {
             let to = msg.to;
+            // 将消息发送给其他节点
             if mailboxes[&to].send(msg).is_err() {
                 error!(
                     logger,
@@ -320,7 +333,7 @@ fn on_ready(
         );
         return;
     }
-
+    // 将 hard_state 写入到wal中
     if let Some(hs) = ready.hs() {
         // Raft HardState changed, and we need to persist it.
         store.wl().set_hardstate(hs.clone());
@@ -398,12 +411,16 @@ impl Proposal {
 
 fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
     let last_index1 = raft_group.raft.raft_log.last_index() + 1;
+    // 获得最新的 index
     if let Some((ref key, ref value)) = proposal.normal {
+        // 普通的提案
         let data = format!("put {} {}", key, value).into_bytes();
         let _ = raft_group.propose(vec![], data);
     } else if let Some(ref cc) = proposal.conf_change {
+        // 配置修改
         let _ = raft_group.propose_conf_change(vec![], cc.clone());
     } else if let Some(_transferee) = proposal.transfer_leader {
+        // 转移leader
         // TODO: implement transfer leader.
         unimplemented!();
     }
